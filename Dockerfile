@@ -6,11 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Streamlink comes from pip so it is current; YouTube changes are usually fixed
 # by a newer streamlink, which a rebuild picks up.
-RUN pip install --upgrade flask requests streamlink
+RUN pip install --upgrade flask streamlink
 
 WORKDIR /app
-COPY youtube-live.py youtube-non-server.py youtube_non_stream_link.py ./
-COPY youtubelive.m3u youtubelinks.xml ./
+COPY youtube-live.py ./
 
 RUN useradd --system --uid 1000 app && chown -R app /app
 USER app
