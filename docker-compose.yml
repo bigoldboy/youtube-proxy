@@ -1,0 +1,8 @@
+services:
+  youtube-proxy:
+    image: ghcr.io/bigoldboy/youtube-proxy:latest
+    # build: .   # use this instead to build locally
+    container_name: youtube-proxy
+    ports:
+      - "6095:6095"
+    restart: unless-stopped
