@@ -27,19 +27,47 @@ services:
 To update: `docker compose pull && docker compose up -d`.
 
 ## YouTube cookies
-YouTube often answers home IPs with "Sign in to confirm you're not a bot". Giving the server
-cookies from a signed-in browser gets past it:
+YouTube often answers home IPs with "Sign in to confirm you're not a bot", and the log shows
+`[YT-DLP ERROR] ... Sign in to confirm you're not a bot`. The fix is to give the server the
+cookies from a browser that is signed in to YouTube.
 
-1. In a private/incognito window, sign in to YouTube, ideally with a spare Google account
-   (YouTube can flag accounts used this way).
-2. Export the youtube.com cookies in Netscape `cookies.txt` format with an extension such as
-   "Get cookies.txt LOCALLY", then close the private window without signing out.
-3. Save the file as `cookies/cookies.txt` next to `docker-compose.yml` and restart the container.
+> **Never commit `cookies.txt` or share it.** It works like a password for that Google account.
+> `.gitignore` already excludes it from this repo.
 
-The file is optional and mounted read-only; the log says at startup whether it was found.
-Export fresh cookies if the bot check comes back. See the
+### Export the cookies (Firefox)
+1. Install the [cookies.txt](https://addons.mozilla.org/firefox/addon/cookies-txt/) add-on and
+   tick **Allow in private windows** when asked (or later: Add-ons → cookies.txt →
+   Run in Private Windows → Allow).
+2. Open a **private window** (Ctrl+Shift+P) and sign in to youtube.com. A spare Google account
+   is safer, because YouTube can flag accounts used this way.
+3. In that same tab, go to `https://www.youtube.com/robots.txt`. This stops YouTube from
+   changing the cookies while you export.
+4. Click the cookies.txt icon, choose **Current site**, and save.
+5. Close the private window. Don't sign out, or the cookies stop working.
+
+In Chrome or Edge, the "Get cookies.txt LOCALLY" extension does the same job.
+
+### Put the file in place
+- The add-on saves private-window cookies as `cookies.firefox-private.txt`. **Rename it to exactly
+  `cookies.txt`.** On Windows, turn on View → Show → File name extensions first, so you don't
+  end up with `cookies.txt.txt`.
+- Open it in Notepad to check it. It should have lines starting with `.youtube.com`, including
+  `SID` or `__Secure-3PSID`. If it's nearly empty, you exported from the wrong window.
+- Put it in a folder on the Docker host and mount that folder at `/cookies` in the compose file:
+
+  ```yaml
+      volumes:
+        - D:/docker/youtube-proxy/cookies:/cookies:ro   # folder that holds cookies.txt
+  ```
+
+- Restart the container. The log should say `Using cookies from /cookies/cookies.txt`.
+
+### When the bot error comes back
+The cookies have expired. Repeat the export above, replace `cookies.txt`, and restart the
+container. You don't need a new image for this. More detail is in the
 [yt-dlp guide](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
 
+### Other errors
 If a stream fails, the error from yt-dlp is in the container log and in the `/stream` response.
 If it isn't the bot check, YouTube has usually changed something and a newer yt-dlp fixes it:
 pull the latest image, or run the workflow manually from the Actions tab.
