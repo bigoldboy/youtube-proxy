@@ -1,13 +1,11 @@
-import subprocess
-import json
 import logging
 import os
-import time
-from flask import Flask, request, Response, jsonify
+import shutil
+import subprocess
+import tempfile
 from urllib.parse import unquote
 
-# Ensure UTF-8 encoding
-os.environ["PYTHONIOENCODING"] = "utf-8"
+from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
 
@@ -16,44 +14,34 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-STREAMLINK_PATH = "streamlink"  # Full path if needed
+YTDLP_PATH = os.environ.get("YTDLP_PATH", "yt-dlp")
 
-COMMON_HEADERS = [
-    "--http-header",
-    "User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-    "--http-header",
-    "Accept-Language=en-US,en;q=0.9"
+# Netscape-format cookies.txt exported from a signed-in browser. YouTube now
+# asks many home IPs to "sign in to confirm you're not a bot", and cookies are
+# the only reliable way past that check. Optional: skipped if the file is absent.
+COOKIES_FILE = os.environ.get("COOKIES_FILE", "/cookies/cookies.txt")
+
+YTDLP_ARGS = [
+    "--quiet",
+    "--no-warnings",
+    "--no-playlist",
+    "--no-part",
+    "-f", "best",
 ]
 
 
-# -----------------------------
-# Streamlink JSON Info (with retry)
-# -----------------------------
-def get_stream_info(url, retries=3):
-    for attempt in range(retries):
-        logging.info(f"Fetching stream info (attempt {attempt+1})")
-
-        cmd = [STREAMLINK_PATH, "--json"] + COMMON_HEADERS + [url]
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        stdout, stderr = process.communicate()
-
-        if process.returncode == 0:
-            return json.loads(stdout.decode("utf-8", errors="replace"))
-
-        logging.warning(stderr.decode("utf-8", errors="replace"))
-        time.sleep(1)
-
-    return None
+def cookies_copy():
+    """yt-dlp rewrites the cookies file it is given, so hand each process its
+    own copy. That keeps concurrent streams from clobbering each other and lets
+    the user's file be mounted read-only."""
+    if not os.path.isfile(COOKIES_FILE):
+        return None
+    fd, path = tempfile.mkstemp(prefix="cookies-", suffix=".txt")
+    os.close(fd)
+    shutil.copyfile(COOKIES_FILE, path)
+    return path
 
 
-# -----------------------------
-# Main Stream Endpoint
-# -----------------------------
 @app.route("/stream", methods=["GET"])
 def stream():
     url = request.args.get("url")
@@ -62,39 +50,41 @@ def stream():
 
     url = unquote(url)
     client_ip = request.remote_addr
-
     logging.info(f"[CLIENT CONNECT] {client_ip} → {url}")
 
-    stream_info = get_stream_info(url)
+    cookies = cookies_copy()
+    command = [YTDLP_PATH] + YTDLP_ARGS
+    if cookies:
+        command += ["--cookies", cookies]
+    command += ["-o", "-", url]
 
-    if not stream_info or "streams" not in stream_info:
-        return jsonify({"error": "Failed to retrieve stream info"}), 500
-
-    if "best" not in stream_info["streams"]:
-        return jsonify({"error": "No valid streams found"}), 404
-
-    # -----------------------------
-    # Streamlink execution command
-    # -----------------------------
-    command = [
-        STREAMLINK_PATH,
-        "--hls-live-restart",
-    ] + COMMON_HEADERS + [
-        url,
-        "best",
-        "--stdout"
-    ]
-
+    # stderr goes to a temp file so a chatty yt-dlp/ffmpeg can never fill a
+    # pipe nobody reads and stall the stream.
+    errlog = tempfile.TemporaryFile()
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=errlog,
         bufsize=8192
     )
+    process.errlog = errlog
+
+    # Wait for the first bytes so a failure (bot check, not live, bad URL)
+    # comes back as an error with yt-dlp's reason instead of an empty stream.
+    first_chunk = process.stdout.read(8192)
+    if not first_chunk:
+        process.wait()
+        errlog.seek(0)
+        error = errlog.read().decode("utf-8", errors="replace").strip()
+        error = error or f"yt-dlp exited with code {process.returncode}"
+        logging.warning(f"[YT-DLP ERROR] {error}")
+        cleanup_process(process, client_ip, cookies)
+        return jsonify({"error": "Failed to start stream", "detail": error}), 502
 
     def generate():
         try:
             logging.info(f"[STREAM START] {client_ip}")
+            yield first_chunk
             while True:
                 chunk = process.stdout.read(8192)
                 if not chunk:
@@ -105,21 +95,18 @@ def stream():
         except Exception as e:
             logging.error(f"[STREAM ERROR] {e}")
         finally:
-            cleanup_process(process, client_ip)
+            cleanup_process(process, client_ip, cookies)
 
     response = Response(generate(), content_type="video/mp2t")
 
     @response.call_on_close
     def cleanup():
-        cleanup_process(process, client_ip)
+        cleanup_process(process, client_ip, cookies)
 
     return response
 
 
-# -----------------------------
-# Cleanup Helper
-# -----------------------------
-def cleanup_process(process, client_ip):
+def cleanup_process(process, client_ip, cookies=None):
     if process.poll() is None:
         logging.info(f"[CLEANUP] Terminating process for {client_ip}")
         process.terminate()
@@ -128,14 +115,17 @@ def cleanup_process(process, client_ip):
         except subprocess.TimeoutExpired:
             process.kill()
 
-    if process.stdout:
-        process.stdout.close()
-    if process.stderr:
-        process.stderr.close()
+    for f in (process.stdout, getattr(process, "errlog", None)):
+        if f and not f.closed:
+            f.close()
+
+    if cookies and os.path.exists(cookies):
+        os.remove(cookies)
 
 
-# -----------------------------
-# Run Server
-# -----------------------------
 if __name__ == "__main__":
+    if os.path.isfile(COOKIES_FILE):
+        logging.info(f"Using cookies from {COOKIES_FILE}")
+    else:
+        logging.info(f"No cookies file at {COOKIES_FILE}; YouTube may ask to confirm you're not a bot")
     app.run(host="0.0.0.0", port=6095, threaded=True)

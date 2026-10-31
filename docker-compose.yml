@@ -5,4 +5,7 @@ services:
     container_name: youtube-proxy
     ports:
       - "6095:6095"
+    volumes:
+      # Folder holding cookies.txt exported from a signed-in browser (see README).
+      - ./cookies:/cookies:ro
     restart: unless-stopped
