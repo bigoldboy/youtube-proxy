@@ -30,6 +30,7 @@ COMMON_HEADERS = [
 # Streamlink JSON Info (with retry)
 # -----------------------------
 def get_stream_info(url, retries=3):
+    last_error = None
     for attempt in range(retries):
         logging.info(f"Fetching stream info (attempt {attempt+1})")
 
@@ -42,13 +43,26 @@ def get_stream_info(url, retries=3):
 
         stdout, stderr = process.communicate()
 
-        if process.returncode == 0:
-            return json.loads(stdout.decode("utf-8", errors="replace"))
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
 
-        logging.warning(stderr.decode("utf-8", errors="replace"))
+        if process.returncode == 0:
+            return json.loads(out), None
+
+        # With --json, streamlink reports failures as {"error": "..."} on stdout
+        try:
+            reason = json.loads(out).get("error") or out
+        except ValueError:
+            reason = out
+        reason = reason or err or f"streamlink exited with code {process.returncode}"
+
+        logging.warning(f"[STREAMLINK ERROR] {reason}")
+        if err:
+            logging.warning(f"[STREAMLINK STDERR] {err}")
+        last_error = reason
         time.sleep(1)
 
-    return None
+    return None, last_error
 
 
 # -----------------------------
@@ -65,10 +79,13 @@ def stream():
 
     logging.info(f"[CLIENT CONNECT] {client_ip} → {url}")
 
-    stream_info = get_stream_info(url)
+    stream_info, error = get_stream_info(url)
 
     if not stream_info or "streams" not in stream_info:
-        return jsonify({"error": "Failed to retrieve stream info"}), 500
+        return jsonify({
+            "error": "Failed to retrieve stream info",
+            "detail": error,
+        }), 500
 
     if "best" not in stream_info["streams"]:
         return jsonify({"error": "No valid streams found"}), 404
